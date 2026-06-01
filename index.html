@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>订单交期查询</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; display: flex; justify-content: center; padding: 16px; }
+    .container { max-width: 400px; width: 100%; background: white; border-radius: 16px; padding: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+    h1 { font-size: 1.5rem; text-align: center; margin-bottom: 20px; color: #1a73e8; }
+    .section { margin-bottom: 24px; }
+    .label { font-weight: 600; margin-bottom: 8px; display: block; }
+    input[type="file"] { display: none; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 20px; background: #1a73e8; color: white; border: none; border-radius: 12px; font-size: 1rem; cursor: pointer; width: 100%; transition: background 0.2s; }
+    .btn:active { background: #1557b0; }
+    .btn-outline { background: white; color: #1a73e8; border: 2px solid #1a73e8; }
+    .video-container { position: relative; width: 100%; border-radius: 12px; overflow: hidden; margin-top: 12px; background: #000; }
+    video { width: 100%; display: block; }
+    canvas { display: none; }
+    .result-box { background: #e8f0fe; border-radius: 12px; padding: 16px; text-align: center; margin-top: 16px; }
+    .result-box .order { font-size: 1.4rem; font-weight: 700; }
+    .result-box .delivery { font-size: 1.8rem; color: #d93025; margin-top: 8px; font-weight: 700; }
+    .status { text-align: center; color: #5f6368; margin-top: 8px; }
+    .excel-info { font-size: 0.9rem; color: #5f6368; margin-top: 4px; }
+    .btn:disabled { background: #c4c4c4; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>📋 订单交期查询</h1>
+
+  <!-- 上传 Excel -->
+  <div class="section">
+    <span class="label">1. 上传 Excel 文件</span>
+    <input type="file" id="fileInput" accept=".xlsx, .xls">
+    <button class="btn btn-outline" onclick="document.getElementById('fileInput').click()">📂 选择 Excel 文件</button>
+    <div id="excelStatus" class="excel-info">未上传</div>
+  </div>
+
+  <!-- 拍照识别 -->
+  <div class="section">
+    <span class="label">2. 拍摄工票订单号</span>
+    <button class="btn" id="captureBtn" disabled>📷 打开相机并拍照</button>
+    <div class="video-container" id="videoContainer" style="display:none;">
+      <video id="video" autoplay playsinline></video>
+      <button class="btn" id="snapBtn" style="margin-top:8px;">🔍 识别此画面</button>
+    </div>
+    <canvas id="canvas"></canvas>
+    <div class="status" id="status"></div>
+  </div>
+
+  <!-- 结果展示 -->
+  <div class="result-box" id="resultBox" style="display:none;">
+    <div>订单号 <span class="order" id="orderDisplay"></span></div>
+    <div>交期 <span class="delivery" id="deliveryDisplay"></span></div>
+  </div>
+</div>
+
+<!-- 依赖库 -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+<script>
+  // ========== 全局状态 ==========
+  let excelData = [];          // [{订单编号, 交期}, ...]
+  let orderCol = null;        // 订单编号列名
+  let deliveryCol = null;     // 交期列名
+  let videoStream = null;
+  let worker = null;          // Tesseract worker
+
+  // DOM 元素
+  const fileInput = document.getElementById('fileInput');
+  const excelStatus = document.getElementById('excelStatus');
+  const captureBtn = document.getElementById('captureBtn');
+  const videoContainer = document.getElementById('videoContainer');
+  const video = document.getElementById('video');
+  const snapBtn = document.getElementById('snapBtn');
+  const canvas = document.getElementById('canvas');
+  const statusDiv = document.getElementById('status');
+  const resultBox = document.getElementById('resultBox');
+  const orderDisplay = document.getElementById('orderDisplay');
+  const deliveryDisplay = document.getElementById('deliveryDisplay');
+
+  // ========== 1. Excel 上传与解析 ==========
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    statusDiv.textContent = '正在解析 Excel...';
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, { type: 'array' });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const jsonData = XLSX.utils.sheet_to_json(firstSheet, { defval: '' });
+      if (jsonData.length === 0) throw new Error('表格无数据');
+
+      // 自动查找列名（模糊匹配）
+      const headers = Object.keys(jsonData[0]);
+      orderCol = headers.find(h => /订单号|订单编号|order\s*id|单号/i.test(h));
+      deliveryCol = headers.find(h => /交期|交货日期|delivery\s*date|due\s*date/i.test(h));
+      if (!orderCol || !deliveryCol) throw new Error('未找到“订单编号”或“交期”列，请检查 Excel 表头');
+
+      // 构建数据，订单号转字符串并去除空格
+      excelData = jsonData.map(row => ({
+        订单编号: String(row[orderCol] || '').trim(),
+        交期: String(row[deliveryCol] || '').trim()
+      })).filter(item => item.订单编号 !== '');
+
+      excelStatus.textContent = `已加载 ${excelData.length} 条订单数据 (列: ${orderCol} / ${deliveryCol})`;
+      captureBtn.disabled = false;
+      statusDiv.textContent = '';
+      console.log('Excel 数据:', excelData);
+    } catch (err) {
+      statusDiv.textContent = '解析失败: ' + err.message;
+      excelStatus.textContent = '解析出错';
+      captureBtn.disabled = true;
+    }
+  });
+
+  // ========== 2. 摄像头与拍照 ==========
+  captureBtn.addEventListener('click', async () => {
+    try {
+      // 打开摄像头
+      videoStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      video.srcObject = videoStream;
+      videoContainer.style.display = 'block';
+      captureBtn.style.display = 'none';
+      statusDiv.textContent = '对准工票订单号，点击“识别此画面”';
+    } catch (err) {
+      statusDiv.textContent = '无法打开摄像头: ' + err.message;
+      // 降级：允许选择图片
+      if (confirm('摄像头不可用，是否从相册选择图片？')) {
+        selectImageFromGallery();
+      }
+    }
+  });
+
+  // 拍照并识别
+  snapBtn.addEventListener('click', () => {
+    if (!videoStream) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // 停止摄像头
+    stopCamera();
+    // 识别图片
+    recognizeImage(canvas.toDataURL('image/png'));
+  });
+
+  function stopCamera() {
+    if (videoStream) {
+      videoStream.getTracks().forEach(track => track.stop());
+      videoStream = null;
+    }
+    videoContainer.style.display = 'none';
+    captureBtn.style.display = 'block';
+  }
+
+  // 从相册选择图片（备用）
+  function selectImageFromGallery() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => recognizeImage(ev.target.result);
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  }
+
+  // ========== 3. OCR 识别 ==========
+  async function initWorker() {
+    if (worker) return worker;
+    statusDiv.textContent = '正在加载 OCR 引擎（首次需联网下载语言包）...';
+    worker = await Tesseract.createWorker('eng', 1, {
+      logger: m => {
+        if (m.status === 'recognizing text') {
+          statusDiv.textContent = `识别中... ${Math.round(m.progress * 100)}%`;
+        }
+      }
+    });
+    // 设置仅识别数字
+    await worker.setParameters({
+      tessedit_char_whitelist: '0123456789',
+    });
+    return worker;
+  }
+
+  async function recognizeImage(imageDataUrl) {
+    resultBox.style.display = 'none';
+    statusDiv.textContent = '正在识别...';
+    try {
+      const w = await initWorker();
+      const { data: { text } } = await w.recognize(imageDataUrl);
+      const rawText = text.replace(/\s/g, ''); // 去除所有空格、换行
+      statusDiv.textContent = '识别结果: ' + rawText;
+      // 提取连续数字作为订单号（取第一个匹配的数字串）
+      const match = rawText.match(/\d+/);
+      if (match) {
+        const orderNo = match[0];
+        lookupOrder(orderNo);
+      } else {
+        statusDiv.textContent = '未识别到数字，请重试';
+      }
+    } catch (err) {
+      statusDiv.textContent = '识别错误: ' + err.message;
+    }
+  }
+
+  // ========== 4. 查询交期 ==========
+  function lookupOrder(orderNo) {
+    const found = excelData.find(item => item.订单编号 === orderNo);
+    if (found) {
+      orderDisplay.textContent = orderNo;
+      deliveryDisplay.textContent = found.交期 || '（无交期）';
+      resultBox.style.display = 'block';
+      statusDiv.textContent = '查询成功';
+    } else {
+      orderDisplay.textContent = orderNo;
+      deliveryDisplay.textContent = '未找到此订单';
+      resultBox.style.display = 'block';
+      statusDiv.textContent = 'Excel 中无此订单号';
+    }
+  }
+
+  // ========== 注册 Service Worker 实现离线缓存 ==========
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').then(reg => {
+        console.log('SW registered', reg);
+      }).catch(err => console.log('SW registration failed', err));
+    });
+  }
+</script>
+</body>
+</html>
