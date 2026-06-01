@@ -102,9 +102,9 @@
 
       // 构建数据，订单号转字符串并去除空格
       excelData = jsonData.map(row => ({
-        订单编号: String(row[orderCol] || '').trim(),
-        交期: String(row[deliveryCol] || '').trim()
-      })).filter(item => item.订单编号 !== '');
+    订单编号: String(row[orderCol] || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''),
+    交期: String(row[deliveryCol] || '').trim()
+})).filter(item => item.订单编号 !== '');
 
       excelStatus.textContent = `已加载 ${excelData.length} 条订单数据 (列: ${orderCol} / ${deliveryCol})`;
       captureBtn.disabled = false;
@@ -187,7 +187,7 @@
     });
     // 设置仅识别数字
     await worker.setParameters({
-      tessedit_char_whitelist: '0123456789',
+      tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-',
     });
     return worker;
   }
@@ -201,7 +201,7 @@
       const rawText = text.replace(/\s/g, ''); // 去除所有空格、换行
       statusDiv.textContent = '识别结果: ' + rawText;
       // 提取连续数字作为订单号（取第一个匹配的数字串）
-      const match = rawText.match(/\d+/);
+      const match = rawText.match(/[A-Za-z0-9-]+/);
       if (match) {
         const orderNo = match[0];
         lookupOrder(orderNo);
@@ -215,6 +215,7 @@
 
   // ========== 4. 查询交期 ==========
   function lookupOrder(orderNo) {
+    orderNo = orderNo.toUpperCase().replace(/[^A-Z0-9]/g, '');
     const found = excelData.find(item => item.订单编号 === orderNo);
     if (found) {
       orderDisplay.textContent = orderNo;
